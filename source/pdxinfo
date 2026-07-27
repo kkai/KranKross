@@ -1,0 +1,7 @@
+name=KranKross
+author=Kai Kunze
+description=Crank the runs. Fill the grid. Reveal the picture.
+bundleID=de.kaikunze.krankross
+version=1.0.0
+buildNumber=1
+imagePath=images/

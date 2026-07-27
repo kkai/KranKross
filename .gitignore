@@ -1,0 +1,4 @@
+.DS_Store
+*.pdx/
+*.pdx.zip
+__pycache__/
