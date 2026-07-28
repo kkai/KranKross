@@ -6,8 +6,8 @@ local gfx <const> = pd.graphics
 local VISIBLE_ROWS <const> = 7
 local ROW_H <const> = 22
 
--- Held-button auto-repeat. Without this, crossing a 15-wide grid or a 33-entry
--- puzzle list means 15 or 33 discrete presses.
+-- Held-button auto-repeat. Without this, crossing a 20-wide grid or a 33-entry
+-- puzzle list means 20 or 33 discrete presses.
 local REPEAT_DELAY <const> = 12
 local REPEAT_RATE <const> = 4
 
@@ -71,12 +71,12 @@ function Game:_update_select()
 	end
 
 	self.select_crank = (self.select_crank or 0) + pd.getCrankChange()
-	while self.select_crank >= DEGREES_PER_CELL do
-		self.select_crank -= DEGREES_PER_CELL
+	while self.select_crank >= 45 do
+		self.select_crank -= 45
 		moved = self:_move_selection(1) or moved
 	end
-	while self.select_crank <= -DEGREES_PER_CELL do
-		self.select_crank += DEGREES_PER_CELL
+	while self.select_crank <= -45 do
+		self.select_crank += 45
 		moved = self:_move_selection(-1) or moved
 	end
 
@@ -107,7 +107,6 @@ function Game:_move_selection(delta)
 	elseif i - self.scroll < 1 then
 		self.scroll = i - 1
 	end
-	-- Pull a header into view when it sits directly above the selection.
 	if self.scroll > 0 and self.entries[self.scroll] and self.entries[self.scroll].header then
 		self.scroll -= 1
 	end
@@ -183,177 +182,145 @@ function Game:_start_puzzle(puzzle)
 
 	self.cursor_x = 1
 	self.cursor_y = 1
-	self.axis = AXIS_H
 	self.paint = nil
+	self.zoom_accum = 0
 	self.start_time = nil
 
+	self.board:follow_cursor(self.cursor_x, self.cursor_y)
 	self.state = STATE_PLAYING
 	self.needs_redraw = true
 end
 
 function Game:_update_playing()
-	local changed = false
-
 	if pd.buttonJustPressed(pd.kButtonB) and pd.buttonIsPressed(pd.kButtonA) then
-		-- Both held: treat as a bail-out rather than a paint.
 		self:_abandon()
 		return
 	end
 
-	changed = self:_handle_cursor() or changed
+	local changed = false
+	changed = self:_handle_zoom() or changed
 	changed = self:_handle_paint() or changed
+	changed = self:_handle_cursor() or changed
 
-	if changed then
+	if changed or self.needs_redraw then
 		self.start_time = self.start_time or pd.getCurrentTimeMilliseconds()
 		self:_draw_playing()
+		self.needs_redraw = false
 
 		if self.puzzle:is_solved(self.player) then
 			self:_complete()
 			return
 		end
-	elseif self.needs_redraw then
+	elseif self.start_time then
+		-- Timer needs repainting even when nothing else moved.
 		self:_draw_playing()
-		self.needs_redraw = false
 	end
 end
 
-function Game:_handle_cursor()
-	-- The cursor is frozen while a run is being painted; the crank owns the
-	-- gesture at that point and moving the anchor would be incoherent.
-	if self.paint then
+-- Crank drives zoom (PRD 5). It is never required: the d-pad reaches every
+-- cell at any zoom level, and a docked crank blocks nothing.
+function Game:_handle_zoom()
+	local change = pd.getCrankChange()
+	if change == 0 then
 		return false
 	end
 
-	local dx, dy = 0, 0
-	if self:_repeats(pd.kButtonLeft) then
-		dx, self.axis = -1, AXIS_H
-	elseif self:_repeats(pd.kButtonRight) then
-		dx, self.axis = 1, AXIS_H
-	elseif self:_repeats(pd.kButtonUp) then
-		dy, self.axis = -1, AXIS_V
-	elseif self:_repeats(pd.kButtonDown) then
-		dy, self.axis = 1, AXIS_V
-	else
-		return false
-	end
-
-	self.cursor_x = math.max(1, math.min(self.puzzle.width, self.cursor_x + dx))
-	self.cursor_y = math.max(1, math.min(self.puzzle.height, self.cursor_y + dy))
-	return true
-end
-
--- Tap A or B to toggle one cell. Hold and crank to extend the mark into a run
--- along the axis of the last d-pad movement -- which is how nonograms are
--- actually solved: deduce "a run of four", then draw four.
-function Game:_handle_paint()
-	if pd.buttonJustPressed(pd.kButtonA) then
-		self:_begin_paint(FILLED)
-		return true
-	elseif pd.buttonJustPressed(pd.kButtonB) then
-		self:_begin_paint(CROSSED)
-		return true
-	end
-
-	if not self.paint then
-		return false
-	end
-
-	if not pd.buttonIsPressed(self.paint.button) then
-		self.paint = nil
-		return false
-	end
-
-	local paint = self.paint
-	paint.crank += pd.getCrankChange()
-
+	self.zoom_accum += change
 	local changed = false
-	while paint.crank >= DEGREES_PER_CELL do
-		paint.crank -= DEGREES_PER_CELL
-		changed = self:_extend_run(1) or changed
+
+	while self.zoom_accum >= DEGREES_PER_ZOOM do
+		self.zoom_accum -= DEGREES_PER_ZOOM
+		changed = self:_step_zoom(1) or changed
 	end
-	while paint.crank <= -DEGREES_PER_CELL do
-		paint.crank += DEGREES_PER_CELL
-		changed = self:_extend_run(-1) or changed
+	while self.zoom_accum <= -DEGREES_PER_ZOOM do
+		self.zoom_accum += DEGREES_PER_ZOOM
+		changed = self:_step_zoom(-1) or changed
 	end
 
 	return changed
 end
 
-function Game:_begin_paint(target)
+function Game:_step_zoom(delta)
+	local target = self.board.zoom + delta
+	if target < 1 or target > #ZOOM_LEVELS then
+		self.zoom_accum = 0 -- don't bank travel at the ends
+		return false
+	end
+	self.board:set_zoom(target)
+	self.board:follow_cursor(self.cursor_x, self.cursor_y)
+	return true
+end
+
+-- Tap A or B to toggle one cell. Hold and steer with the d-pad to drag a run
+-- along a line (PRD 5) -- how nonograms are actually solved: deduce a run of
+-- four, then draw four.
+function Game:_handle_paint()
+	if pd.buttonJustPressed(pd.kButtonA) then
+		return self:_begin_paint(FILLED, pd.kButtonA)
+	elseif pd.buttonJustPressed(pd.kButtonB) then
+		return self:_begin_paint(CROSSED, pd.kButtonB)
+	end
+
+	if self.paint and not pd.buttonIsPressed(self.paint.button) then
+		self.paint = nil
+	end
+	return false
+end
+
+function Game:_begin_paint(target, button)
 	local index = self.puzzle:index(self.cursor_x, self.cursor_y)
 	local current = self.player[index]
+
+	-- Tapping a cell that already holds the target state erases instead, and
+	-- the drag then erases along the line.
 	local value = current == target and EMPTY or target
 
-	self.paint = {
-		anchor_x = self.cursor_x,
-		anchor_y = self.cursor_y,
-		value = value,
-		-- Remember which button opened the gesture rather than inferring it
-		-- from the value: an erase sets value to EMPTY, which on its own
-		-- can't tell A from B.
-		button = target == FILLED and pd.kButtonA or pd.kButtonB,
-		offset = 0,
-		crank = 0,
-		snapshot = table.create(#self.player, 0),
-	}
-
-	for i = 1, #self.player do
-		self.paint.snapshot[i] = self.player[i]
-	end
-
-	self:_apply_run()
-	return true
-end
-
-function Game:_extend_run(delta)
-	local paint = self.paint
-	local limit
-	if self.axis == AXIS_H then
-		limit = delta > 0 and (self.puzzle.width - paint.anchor_x) or (1 - paint.anchor_x)
-	else
-		limit = delta > 0 and (self.puzzle.height - paint.anchor_y) or (1 - paint.anchor_y)
-	end
-
-	local next_offset = paint.offset + delta
-	if delta > 0 and next_offset > limit then
-		return false
-	elseif delta < 0 and next_offset < limit then
-		return false
-	end
-
-	paint.offset = next_offset
-	self:_apply_run()
-	return true
-end
-
--- Repaint from the snapshot every time so shrinking a run cleanly un-paints
--- the cells it no longer covers.
-function Game:_apply_run()
-	local paint = self.paint
-	for i = 1, #self.player do
-		self.player[i] = paint.snapshot[i]
-	end
-
-	local step = paint.offset >= 0 and 1 or -1
-	for i = 0, math.abs(paint.offset) do
-		local x, y = paint.anchor_x, paint.anchor_y
-		if self.axis == AXIS_H then
-			x += i * step
-		else
-			y += i * step
-		end
-		self.player[self.puzzle:index(x, y)] = paint.value
-	end
-
-	self.cursor_x = paint.anchor_x
-	self.cursor_y = paint.anchor_y
-	if self.axis == AXIS_H then
-		self.cursor_x = paint.anchor_x + paint.offset
-	else
-		self.cursor_y = paint.anchor_y + paint.offset
-	end
-
+	self.paint = { value = value, button = button, axis = nil }
+	self.player[index] = value
 	self:_auto_cross()
+	return true
+end
+
+function Game:_handle_cursor()
+	local dx, dy = 0, 0
+	if self:_repeats(pd.kButtonLeft) then
+		dx = -1
+	elseif self:_repeats(pd.kButtonRight) then
+		dx = 1
+	elseif self:_repeats(pd.kButtonUp) then
+		dy = -1
+	elseif self:_repeats(pd.kButtonDown) then
+		dy = 1
+	else
+		return false
+	end
+
+	-- A drag locks to the axis of its first movement, so a wobbling thumb
+	-- can't smear paint across two lines.
+	if self.paint then
+		local axis = dx ~= 0 and AXIS_H or AXIS_V
+		if self.paint.axis == nil then
+			self.paint.axis = axis
+		elseif self.paint.axis ~= axis then
+			return false
+		end
+	end
+
+	local nx = math.max(1, math.min(self.puzzle.width, self.cursor_x + dx))
+	local ny = math.max(1, math.min(self.puzzle.height, self.cursor_y + dy))
+	if nx == self.cursor_x and ny == self.cursor_y then
+		return false
+	end
+
+	self.cursor_x, self.cursor_y = nx, ny
+
+	if self.paint then
+		self.player[self.puzzle:index(nx, ny)] = self.paint.value
+		self:_auto_cross()
+	end
+
+	self.board:follow_cursor(nx, ny)
+	return true
 end
 
 -- Once a line's filled runs match its clues, the remaining cells can only be
@@ -389,16 +356,23 @@ function Game:_draw_playing()
 	self.board:draw(self.player, self.cursor_x, self.cursor_y)
 
 	gfx.setFont(gfx.getSystemFont())
-	gfx.drawText(self.puzzle.pack, 6, 4)
+	gfx.setImageDrawMode(gfx.kDrawModeCopy)
+
+	-- Grid size left, zoom centred, timer right. The pack name is deliberately
+	-- absent: it is a category label, and naming the subject's category before
+	-- the reveal gives the puzzle away.
+	gfx.drawText(string.format("%dx%d", self.puzzle.width, self.puzzle.height), 4, -1)
+
+	local zoom = ZOOM_LEVELS[self.board.zoom].name
+	local zw = gfx.getTextSize(zoom)
+	gfx.drawText(zoom, (400 - zw) // 2, -1)
 
 	if self.start_time then
 		local elapsed = pd.getCurrentTimeMilliseconds() - self.start_time
 		local text = Progress.format_time(elapsed)
 		local w = gfx.getTextSize(text)
-		gfx.drawText(text, 400 - w - 6, 4)
+		gfx.drawText(text, 400 - w - 4, -1)
 	end
-
-	gfx.drawText("A+B: quit", 6, 222)
 end
 
 function Game:_abandon()

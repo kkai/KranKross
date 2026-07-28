@@ -2,20 +2,29 @@
 
 A nerd-themed nonogram (Picross) game for the [Playdate](https://play.date), where the crank actually solves the puzzle.
 
-## The crank
+## Controls
 
-Most Playdate nonogram games treat the crank as a menu scroller. KranKross puts it in the solving loop:
+| Input | Action |
+|---|---|
+| D-pad | Move the cursor. Hold to repeat. |
+| A | Fill a cell. **Hold + d-pad** to drag a run along a line. |
+| B | Mark a cross. **Hold + d-pad** to drag a run of crosses. |
+| Crank | Zoom: Overview (8px) / Standard (12px) / Close (20px) |
+| A + B | Back to the puzzle list |
 
-- **D-pad** moves the cursor, **A** fills a cell, **B** marks a cross — the conventional scheme, fully sufficient on its own.
-- **Hold A (or B) and crank** to extend the mark into a run along the axis you last moved. Release to commit.
+A drag locks to the axis of its first movement, so a wobbling thumb can't smear paint across two lines.
 
-That mirrors how nonograms are actually solved: you deduce "this row has a run of four", then draw four. The crank maps to run length — a continuous quantity, which is exactly what a rotary input is good at. Roughly 45° per cell, so a short flick can't overshoot.
+The crank is never required — every puzzle is solvable with the d-pad alone, and a docked crank blocks nothing.
 
-The crank is never on the critical path. Every puzzle is fully solvable with the d-pad alone.
+## Large grids
+
+Puzzles run up to 20×20. When a board is bigger than the screen the camera follows the cursor with a dead-zone, and the clue gutters **stay pinned to the viewport edges** like frozen spreadsheet headers — losing sight of your clues while panning is the worst failure mode in large-grid picross.
+
+Clue numbers are pre-rendered 1-bit tiles rather than drawn text, one sheet per zoom level. A two-digit clue occupies exactly one slot by construction, so the gutters cannot overlap regardless of font metrics. `build_clue_tiles.py` generates the sheets.
 
 ## Puzzles
 
-33 hand-authored puzzles across five packs — Retro Computing, Programming, Hardware, Math and Science, Sci-Fi. No procedural generation; every picture is drawn by hand.
+38 hand-authored puzzles across six packs — Retro Computing, Programming, Hardware, Math and Science, Sci-Fi, Mainframe. No procedural generation; every picture is drawn by hand.
 
 Every puzzle is verified at build time by an iterative line solver. A puzzle only ships if the solver reconstructs it completely using per-line deduction alone, which proves two things at once:
 
@@ -41,9 +50,15 @@ Build and validate:
 
 ```bash
 python3 build_puzzles.py     # -> source/puzzles.lua, rejects bad puzzles
+python3 build_clue_tiles.py  # -> source/img/clues-*.png  (--preview for mockups)
 python3 test_build_puzzles.py
-lua test_model.lua           # cross-checks the Lua model against the Python validator
+lua test_model.lua           # model cross-check + board layout assertions
 ```
+
+`lua test_model.lua` asserts, for every puzzle at every zoom level, that no clue
+tile overlaps another, intrudes into the grid, or detaches from the rows it
+labels. That gate exists because an earlier build shipped with clue numbers
+overlapping by 2px and bleeding into the first grid row.
 
 `build_puzzles.py` exits non-zero if any puzzle fails, so it doubles as a pre-commit gate.
 
@@ -61,14 +76,15 @@ open KranKross.pdx          # macOS: runs in the Playdate Simulator
 ```
 puzzles/*.txt          puzzle source (ASCII art)
 build_puzzles.py       converter + line-solver validator
+build_clue_tiles.py    pre-rendered 1-bit clue number tiles
 source/
   main.lua             entry point
-  constants.lua        cell size, gutter metrics, crank sensitivity
-  game.lua             state machine, input, run painting
+  constants.lua        zoom-level table -- all board geometry derives from it
+  game.lua             state machine, input, zoom, drag painting
   model/puzzle.lua     flat row-major grid, digit-string decoding
   model/numbers.lua    clue derivation and line-completion tracking
   model/progress.lua   best times via playdate.datastore
-  ui/board.lua         clue gutters, grid, cell states, cursor
+  ui/board.lua         pinned clue gutters, scrolling grid, camera, cursor
   puzzles.lua          generated -- do not edit
 ```
 

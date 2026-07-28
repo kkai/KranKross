@@ -2,3 +2,4 @@
 *.pdx/
 *.pdx.zip
 __pycache__/
+preview/
