@@ -6,6 +6,16 @@ local gfx <const> = pd.graphics
 local VISIBLE_ROWS <const> = 7
 local ROW_H <const> = 22
 
+-- Selection row layout. The title column is a redaction bar until solved:
+-- naming the picture in the list would give away the very thing the puzzle
+-- exists to reveal.
+local THUMB_BOX <const> = 20
+local ICON_X <const> = 16
+local LABEL_X <const> = 42
+local TITLE_X <const> = 84
+local META_RIGHT <const> = 380
+local REDACT_W <const> = 132
+
 -- Held-button auto-repeat. Without this, crossing a 20-wide grid or a 33-entry
 -- puzzle list means 20 or 33 discrete presses.
 local REPEAT_DELAY <const> = 12
@@ -17,11 +27,21 @@ function Game:init()
 	self.progress = Progress()
 
 	-- Flatten the packs into one scrolling list, with pack names as headers.
+	-- `order` is the puzzle's position in the flat sequence, which is what the
+	-- unlock gate walks; `label` is its catalogue number, shown instead of the
+	-- title until the puzzle is solved.
 	self.entries = {}
-	for _, pack in ipairs(PUZZLE_PACKS) do
+	self.order = {}
+	for pack_index, pack in ipairs(PUZZLE_PACKS) do
 		table.insert(self.entries, { header = pack.name })
-		for _, def in ipairs(pack.puzzles) do
-			table.insert(self.entries, { puzzle = Puzzle(def, pack.name) })
+		for index_in_pack, def in ipairs(pack.puzzles) do
+			local puzzle = Puzzle(def, pack.name)
+			table.insert(self.order, puzzle:id())
+			table.insert(self.entries, {
+				puzzle = puzzle,
+				order = #self.order,
+				label = string.format("%d-%02d", pack_index, index_in_pack),
+			})
 		end
 	end
 
@@ -81,14 +101,59 @@ function Game:_update_select()
 	end
 
 	if pd.buttonJustPressed(pd.kButtonA) then
-		self:_start_puzzle(self.entries[self.selected].puzzle)
-		return
+		local entry = self.entries[self.selected]
+		if self:_is_unlocked(entry) then
+			self:_start_puzzle(entry.puzzle)
+			return
+		end
+		-- Locked: refuse, and say why rather than silently doing nothing.
+		self.locked_notice = 40
+		moved = true
+	end
+
+	if self.locked_notice and self.locked_notice > 0 then
+		self.locked_notice -= 1
+		if self.locked_notice == 0 then
+			self.locked_notice = nil
+			moved = true
+		end
 	end
 
 	if moved or self.needs_redraw then
 		self:_draw_select()
 		self.needs_redraw = false
 	end
+end
+
+function Game:_is_unlocked(entry)
+	return entry.puzzle ~= nil and self.progress:is_unlocked(self.order, entry.order)
+end
+
+-- A miniature of the solved picture, one or two pixels per cell, built once
+-- and cached on the entry. This is the reward for finishing a puzzle: the
+-- chapter list slowly fills in with the artwork you uncovered.
+function Game:_thumbnail(entry)
+	if entry.thumb then
+		return entry.thumb
+	end
+
+	local puzzle = entry.puzzle
+	local scale = math.max(1, THUMB_BOX // math.max(puzzle.width, puzzle.height))
+	local img = gfx.image.new(puzzle.width * scale, puzzle.height * scale, gfx.kColorWhite)
+
+	gfx.pushContext(img)
+	gfx.setColor(gfx.kColorBlack)
+	for y = 1, puzzle.height do
+		for x = 1, puzzle.width do
+			if puzzle.solution[puzzle:index(x, y)] == 1 then
+				gfx.fillRect((x - 1) * scale, (y - 1) * scale, scale, scale)
+			end
+		end
+	end
+	gfx.popContext()
+
+	entry.thumb = img
+	return img
 end
 
 -- Headers are skipped rather than selectable, so a step may cover two rows.
@@ -135,31 +200,77 @@ function Game:_draw_select()
 		if entry.header then
 			gfx.drawText("*" .. entry.header .. "*", 16, y + 3)
 		else
-			local puzzle = entry.puzzle
-			local id = puzzle:id()
-			local is_selected = index == self.selected
-
-			if is_selected then
-				gfx.fillRect(12, y, 376, ROW_H - 2)
-				gfx.setImageDrawMode(gfx.kDrawModeInverted)
-			end
-
-			local mark = self.progress:is_solved(id) and "\u{2713} " or "  "
-			gfx.drawText(mark .. puzzle.title, 28, y + 3)
-
-			local meta = string.format("%dx%d", puzzle.width, puzzle.height)
-			if self.progress:is_solved(id) then
-				meta = meta .. "   " .. Progress.format_time(self.progress:best_time(id))
-			end
-			local mw = gfx.getTextSize(meta)
-			gfx.drawText(meta, 380 - mw, y + 3)
-
-			gfx.setImageDrawMode(gfx.kDrawModeCopy)
+			self:_draw_puzzle_row(entry, y, index == self.selected)
 		end
 	end
 
 	gfx.drawLine(12, 212, 388, 212)
-	gfx.drawText("A: play    crank or d-pad: browse", 12, 218)
+
+	local selected = self.entries[self.selected]
+	local hint
+	if self.locked_notice then
+		hint = "Locked -- solve the puzzle before it first"
+	elseif selected and not self:_is_unlocked(selected) then
+		hint = "Locked    crank or d-pad: browse"
+	else
+		hint = "A: play    crank or d-pad: browse"
+	end
+	gfx.drawText(hint, 12, 218)
+end
+
+function Game:_draw_puzzle_row(entry, y, is_selected)
+	local puzzle = entry.puzzle
+	local id = puzzle:id()
+	local solved = self.progress:is_solved(id)
+	local unlocked = self:_is_unlocked(entry)
+
+	if is_selected then
+		gfx.fillRect(12, y, 376, ROW_H - 2)
+		gfx.setImageDrawMode(gfx.kDrawModeInverted)
+	end
+
+	-- fillRect/drawRect ignore the image draw mode, so shapes have to flip
+	-- colour by hand on a highlighted row.
+	local ink = is_selected and gfx.kColorWhite or gfx.kColorBlack
+
+	if solved then
+		self:_thumbnail(entry):draw(ICON_X, y + 1)
+	elseif not unlocked then
+		self:_draw_lock(ICON_X + 4, y + 3, ink)
+	end
+
+	gfx.drawText(entry.label, LABEL_X, y + 3)
+
+	if solved then
+		gfx.drawText(puzzle.title, TITLE_X, y + 3)
+	else
+		-- Redaction bar. Hollow while locked, solid once it is your next one,
+		-- so the frontier is readable at a glance.
+		gfx.setColor(ink)
+		if unlocked then
+			gfx.fillRect(TITLE_X, y + 6, REDACT_W, 9)
+		else
+			gfx.setLineWidth(1)
+			gfx.drawRect(TITLE_X, y + 6, REDACT_W, 9)
+		end
+		gfx.setColor(gfx.kColorBlack)
+	end
+
+	local meta = string.format("%dx%d", puzzle.width, puzzle.height)
+	if solved then
+		meta = meta .. "   " .. Progress.format_time(self.progress:best_time(id))
+	end
+	gfx.drawText(meta, META_RIGHT - gfx.getTextSize(meta), y + 3)
+
+	gfx.setImageDrawMode(gfx.kDrawModeCopy)
+end
+
+function Game:_draw_lock(x, y, ink)
+	gfx.setColor(ink)
+	gfx.setLineWidth(1)
+	gfx.drawRect(x + 2, y + 1, 6, 6)   -- shackle
+	gfx.fillRect(x, y + 6, 10, 7)      -- body
+	gfx.setColor(gfx.kColorBlack)
 end
 
 function Game:_puzzle_count()
@@ -277,7 +388,7 @@ function Game:_begin_paint(target, button)
 
 	self.paint = { value = value, button = button, axis = nil }
 	self.player[index] = value
-	self:_auto_cross()
+	self:_auto_cross(self.cursor_x, self.cursor_y)
 	return true
 end
 
@@ -316,7 +427,7 @@ function Game:_handle_cursor()
 
 	if self.paint then
 		self.player[self.puzzle:index(nx, ny)] = self.paint.value
-		self:_auto_cross()
+		self:_auto_cross(nx, ny)
 	end
 
 	self.board:follow_cursor(nx, ny)
@@ -325,27 +436,28 @@ end
 
 -- Once a line's filled runs match its clues, the remaining cells can only be
 -- empty -- crossing them saves the player a lot of bookkeeping.
-function Game:_auto_cross()
+--
+-- Only the row and column through the cell that just changed can have become
+-- complete, so only those two are rescanned. Sweeping the whole board here
+-- cost width*height work per keystroke: on a 20x20 that was 40 line scans over
+-- 400 cells for every single d-pad step of a drag.
+function Game:_auto_cross(cx, cy)
 	local puzzle = self.puzzle
 
-	for y = 1, puzzle.height do
-		if self.numbers:is_row_complete(self.player, y) then
-			for x = 1, puzzle.width do
-				local i = puzzle:index(x, y)
-				if self.player[i] == EMPTY then
-					self.player[i] = CROSSED
-				end
+	if self.numbers:is_row_complete(self.player, cy) then
+		for x = 1, puzzle.width do
+			local i = puzzle:index(x, cy)
+			if self.player[i] == EMPTY then
+				self.player[i] = CROSSED
 			end
 		end
 	end
 
-	for x = 1, puzzle.width do
-		if self.numbers:is_column_complete(self.player, x) then
-			for y = 1, puzzle.height do
-				local i = puzzle:index(x, y)
-				if self.player[i] == EMPTY then
-					self.player[i] = CROSSED
-				end
+	if self.numbers:is_column_complete(self.player, cx) then
+		for y = 1, puzzle.height do
+			local i = puzzle:index(cx, y)
+			if self.player[i] == EMPTY then
+				self.player[i] = CROSSED
 			end
 		end
 	end

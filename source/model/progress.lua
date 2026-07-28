@@ -31,6 +31,25 @@ function Progress:record(puzzle_id, time_ms)
 	return true
 end
 
+-- Puzzles unlock in order: you cannot start one until the previous is solved.
+-- Kept as a pure function of the id list so it is testable headlessly.
+function Progress:is_unlocked(ordered_ids, index)
+	if index <= 1 then
+		return true
+	end
+	return self:is_solved(ordered_ids[index - 1])
+end
+
+-- Index of the first puzzle not yet solved -- where the player is up to.
+function Progress:frontier(ordered_ids)
+	for i = 1, #ordered_ids do
+		if not self:is_solved(ordered_ids[i]) then
+			return i
+		end
+	end
+	return #ordered_ids
+end
+
 function Progress:solved_count()
 	local count = 0
 	for _ in pairs(self.best) do

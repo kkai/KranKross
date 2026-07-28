@@ -33,10 +33,15 @@ end
 table.create = function() return {} end
 
 local noop = function() end
+local fake_store = {}
 playdate = {
 	graphics = {
 		imagetable = { new = function() return { drawImage = noop } end },
 		getSystemFont = function() return {} end,
+	},
+	datastore = {
+		read = function(key) return fake_store[key] end,
+		write = function(value, key) fake_store[key] = value end,
 	},
 }
 
@@ -55,6 +60,7 @@ end
 load_playdate_lua("source/constants.lua")
 load_playdate_lua("source/model/puzzle.lua")
 load_playdate_lua("source/model/numbers.lua")
+load_playdate_lua("source/model/progress.lua")
 load_playdate_lua("source/ui/board.lua")
 load_playdate_lua("source/puzzles.lua")
 
@@ -168,6 +174,41 @@ check(count .. " puzzles loaded", count > 0, count)
 check("all puzzles self-consistent", bad == 0, bad .. " problem(s)")
 
 -- --------------------------------------------------------- board geometry
+
+print("\nProgression gate")
+
+fake_store[SAVE_KEY] = nil
+local order = { "P/one", "P/two", "P/three" }
+local prog = Progress()
+
+check("first puzzle is always open", prog:is_unlocked(order, 1))
+check("second is locked before the first is solved", not prog:is_unlocked(order, 2))
+check("third is locked too", not prog:is_unlocked(order, 3))
+check("frontier starts at 1", prog:frontier(order) == 1, prog:frontier(order))
+
+prog:record(order[1], 12345)
+check("second unlocks once the first is solved", prog:is_unlocked(order, 2))
+check("third is still locked", not prog:is_unlocked(order, 3))
+check("frontier advances", prog:frontier(order) == 2, prog:frontier(order))
+check("solving does not unlock everything", not prog:is_unlocked(order, 3))
+
+prog:record(order[2], 999)
+check("third unlocks in turn", prog:is_unlocked(order, 3))
+check("best time is retained", prog:best_time(order[1]) == 12345, prog:best_time(order[1]))
+check("solved count tracks", prog:solved_count() == 2, prog:solved_count())
+
+-- A slower run must not overwrite a better time.
+check("slower run is not a record", prog:record(order[1], 99999) == false)
+check("best time unchanged after slower run", prog:best_time(order[1]) == 12345)
+check("faster run is a record", prog:record(order[1], 5000) == true)
+check("best time improved", prog:best_time(order[1]) == 5000)
+
+-- Progress must survive a reload from the datastore.
+local reloaded = Progress()
+check("progress persists across reload", reloaded:is_solved(order[1]) and reloaded:is_solved(order[2]))
+check("reloaded gate still opens the third", reloaded:is_unlocked(order, 3))
+check("reloaded frontier is the third", reloaded:frontier(order) == 3, reloaded:frontier(order))
+fake_store[SAVE_KEY] = nil
 
 print("\nZoom table sanity")
 
